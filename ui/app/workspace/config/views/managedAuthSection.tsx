@@ -12,15 +12,18 @@ import {
 } from "@/components/ui/alertDialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { useCopyToClipboard } from "@/hooks/useCopyToClipboard";
+import { IS_ENTERPRISE } from "@/lib/constants/config";
 import { getErrorMessage } from "@/lib/store";
 import {
 	type ManagedClientIdentity,
+	type ManagedClientScope,
 	type OAuth2ManagedClient,
 	useCreateOAuth2ManagedClientMutation,
 	useDeleteOAuth2ManagedClientMutation,
@@ -38,6 +41,17 @@ export const DEFAULT_MANAGED_AUTH_TTL = 86400;
 const MIN_MANAGED_AUTH_TTL = 60;
 const MAX_MANAGED_AUTH_TTL = 86400;
 const CLAUDE_CODE_CLIENT_ID = "https://claude.ai/oauth/claude-code-client-metadata";
+
+// Scopes offered per client. Only enterprise builds accept llm tokens on the inference routes, so OSS offers mcp alone.
+const MANAGED_CLIENT_SCOPES: { scope: ManagedClientScope; label: string }[] = [
+	{ scope: "mcp", label: "MCP" },
+	{ scope: "llm", label: "LLM inference" },
+];
+
+// toggleScope returns scopes with scope added or removed, in the offered order.
+function toggleScope(scopes: ManagedClientScope[], scope: ManagedClientScope, on: boolean): ManagedClientScope[] {
+	return MANAGED_CLIENT_SCOPES.map((s) => s.scope).filter((s) => (s === scope ? on : scopes.includes(s)));
+}
 
 // validateManagedAuth mirrors the backend's ManagedAuthConfig.Validate so the
 // page can refuse a save that would come back as a 400.
@@ -277,6 +291,7 @@ function ManagedClients({ canEdit, userIdentityAvailable, clients }: ManagedClie
 						<TableRow>
 							<TableHead>Client</TableHead>
 							<TableHead>Acts as</TableHead>
+							{IS_ENTERPRISE && <TableHead>Scopes</TableHead>}
 							<TableHead>Last used</TableHead>
 							<TableHead className="text-right">Actions</TableHead>
 						</TableRow>
@@ -304,6 +319,16 @@ function ManagedClients({ canEdit, userIdentityAvailable, clients }: ManagedClie
 									</div>
 								</TableCell>
 								<TableCell className="text-sm">{client.identity === "user" ? "The signed-in user" : "Bound virtual key"}</TableCell>
+								{IS_ENTERPRISE && (
+									<TableCell>
+										<ScopeCheckboxes
+											idPrefix={`managed-client-${client.id}`}
+											scopes={client.scopes}
+											disabled={!canEdit}
+											onChange={(scopes) => run(() => updateClient({ id: client.id, scopes }).unwrap(), "Client scopes updated.")}
+										/>
+									</TableCell>
+								)}
 								<TableCell className="text-muted-foreground text-sm">
 									{client.last_used_at ? new Date(client.last_used_at).toLocaleString() : "Never"}
 								</TableCell>
@@ -424,6 +449,42 @@ function ManagedClients({ canEdit, userIdentityAvailable, clients }: ManagedClie
 	);
 }
 
+// ScopeCheckboxes edits the scopes a managed client may be granted; the last one cannot be cleared.
+function ScopeCheckboxes({
+	idPrefix,
+	scopes,
+	disabled,
+	onChange,
+}: {
+	idPrefix: string;
+	scopes: ManagedClientScope[];
+	disabled?: boolean;
+	onChange: (scopes: ManagedClientScope[]) => void;
+}) {
+	return (
+		<div className="flex flex-col gap-1">
+			{MANAGED_CLIENT_SCOPES.map(({ scope, label }) => {
+				const checked = scopes.includes(scope);
+				const id = `${idPrefix}-scope-${scope}`;
+				return (
+					<div key={scope} className="flex items-center gap-2">
+						<Checkbox
+							id={id}
+							data-testid={id}
+							checked={checked}
+							disabled={disabled || (checked && scopes.length === 1)}
+							onCheckedChange={(on) => onChange(toggleScope(scopes, scope, on === true))}
+						/>
+						<label htmlFor={id} className="text-sm">
+							{label}
+						</label>
+					</div>
+				);
+			})}
+		</div>
+	);
+}
+
 // CredentialRow shows one read-only credential with a copy button.
 function CredentialRow({ label, value, testId }: { label: string; value: string; testId?: string }) {
 	const { copy } = useCopyToClipboard({ successMessage: `${label} copied.` });
@@ -460,6 +521,7 @@ function CreateManagedClientDialog({ open, onOpenChange, userIdentityAvailable, 
 	const [confidential, setConfidential] = useState(true);
 	const [identity, setIdentity] = useState<ManagedClientIdentity>(userIdentityAvailable ? "user" : "vk");
 	const [virtualKeyID, setVirtualKeyID] = useState("");
+	const [scopes, setScopes] = useState<ManagedClientScope[]>(["mcp"]);
 
 	useEffect(() => {
 		if (open) {
@@ -468,6 +530,7 @@ function CreateManagedClientDialog({ open, onOpenChange, userIdentityAvailable, 
 			setConfidential(true);
 			setIdentity(userIdentityAvailable ? "user" : "vk");
 			setVirtualKeyID("");
+			setScopes(["mcp"]);
 		}
 	}, [open, userIdentityAvailable]);
 
@@ -483,6 +546,7 @@ function CreateManagedClientDialog({ open, onOpenChange, userIdentityAvailable, 
 				public: !confidential,
 				identity,
 				virtual_key_id: identity === "vk" ? virtualKeyID : undefined,
+				scopes: IS_ENTERPRISE ? scopes : undefined,
 			}).unwrap();
 			onCreated(created);
 		} catch (error) {
@@ -547,6 +611,15 @@ function CreateManagedClientDialog({ open, onOpenChange, userIdentityAvailable, 
 							</>
 						)}
 					</div>
+					{IS_ENTERPRISE && (
+						<div className="space-y-1.5">
+							<p className="text-sm font-medium">Allowed scopes</p>
+							<p className="text-muted-foreground text-xs">
+								LLM inference lets the client call the model endpoints with its token. The identity provider must also grant the scope.
+							</p>
+							<ScopeCheckboxes idPrefix="managed-client-create" scopes={scopes} onChange={setScopes} />
+						</div>
+					)}
 				</div>
 				<DialogFooter>
 					<Button variant="outline" onClick={() => onOpenChange(false)}>
